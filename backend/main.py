@@ -11,7 +11,6 @@ load_dotenv()
 
 app = FastAPI(title="Visual Lab API v9 · Motion Matrix", version="9.0.0")
 
-# CORS — allow any frontend (tighten to your domain in prod)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,10 +19,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-API_SECRET   = os.getenv("API_SECRET", "default-secret-change-me")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-GROQ_BASE    = "https://api.groq.com/openai/v1"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+API_SECRET     = os.getenv("API_SECRET", "default-secret-change-me")
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_BASE    = "https://api.openai.com/v1"
 
 # ============================================================
 # Auth
@@ -128,25 +127,28 @@ Output valid JSON only. No markdown.
 """
 
 # ============================================================
-# Helpers
+# Helper — OpenAI chat
 # ============================================================
-async def groq_chat(messages: list, temperature: float = 0.3, max_tokens: int = 800) -> str:
-    if not GROQ_API_KEY:
-        raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
+async def openai_chat(messages: list, temperature: float = 0.3, max_tokens: int = 800) -> str:
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
-            f"{GROQ_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            f"{OPENAI_BASE}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            },
             json={
-                "model": GROQ_MODEL,
+                "model": OPENAI_MODEL,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             }
         )
     if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Groq API error: {resp.status_code} {resp.text}")
+        raise HTTPException(status_code=502, detail=f"OpenAI API error: {resp.status_code} {resp.text}")
 
     data = resp.json()
     return data["choices"][0]["message"]["content"]
@@ -172,11 +174,11 @@ def strip_markdown(text: str) -> str:
 # ============================================================
 @app.get("/")
 async def root():
-    return {"status": "Visual Lab API v9 · Motion Matrix", "version": "9.0.0"}
+    return {"status": "Visual Lab API v9 · Motion Matrix", "version": "9.0.0", "llm": "OpenAI"}
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "groq_configured": bool(GROQ_API_KEY), "version": "9.0.0"}
+    return {"ok": True, "openai_configured": bool(OPENAI_API_KEY), "model": OPENAI_MODEL, "version": "9.0.0"}
 
 @app.post("/api/translate", response_model=PromptResponse)
 async def translate(req: TranslateRequest, api_key: str = Depends(verify_api_key)):
@@ -189,7 +191,7 @@ Mode: {req.mode}
 
 Output only the prompt.'''
 
-    content = await groq_chat([
+    content = await openai_chat([
         {"role": "system", "content": TRANSLATE_SYSTEM},
         {"role": "user",   "content": user_msg}
     ])
@@ -213,7 +215,7 @@ Keep AR {req.ar}, stylize {req.stylize}, chaos {req.chaos}, version 8.1.
 
 Output only the refined prompt."""
 
-    content = await groq_chat([
+    content = await openai_chat([
         {"role": "system", "content": ENHANCE_SYSTEM},
         {"role": "user",   "content": user_msg}
     ])
@@ -248,7 +250,7 @@ Fixed parameters: --ar {req.ar} --raw --stylize {req.stylize} --c {req.chaos} --
 Return ONLY a JSON array. Example:
 [{{"changed": "Anya Taylor-Joy | Tactical Bikini", "prompt": "..."}}]"""
 
-    content = await groq_chat(
+    content = await openai_chat(
         [
             {"role": "system", "content": VARIATIONS_SYSTEM},
             {"role": "user",   "content": user_msg}
