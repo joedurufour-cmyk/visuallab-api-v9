@@ -271,3 +271,122 @@ Return ONLY a JSON array. Example:
             raise HTTPException(status_code=500, detail="Failed to parse variations JSON")
 
     return VariationsResponse(variations=parsed)
+
+
+# ============================================================
+# NEXUS NORMALIZER — /api/normalize
+# GPT-4o semantic inference on MJ prompt redundancy
+# ============================================================
+class NormalizeRequest(BaseModel):
+    prompt: str
+    max_tokens: Optional[int] = 40
+
+class NormalizeResponse(BaseModel):
+    original: str
+    normalized: str
+    token_count_before: int
+    token_count_after: int
+    changes: List[str]
+    layers: dict
+
+NORMALIZE_SYSTEM = """You are NEXUS VISUAL — a Midjourney V8.1 prompt normalizer with deep knowledge of latent space coherence.
+
+Your job: receive a raw MJ prompt (assembled from multiple sources — may have redundancies, conflicts, duplicates) and return a clean, optimized version.
+
+NORMALIZATION RULES:
+
+1. SEMANTIC DEDUPLICATION (most important):
+   - Detect semantically equivalent tokens: "ascending flight" + "hover" → keep only "ascending flight" (more specific)
+   - "hyper-exaggerated musculature" + "brutal defined abs" → merge into single strongest descriptor
+   - "void black background" + "pure black studio" → keep one
+   - "hard 45° sun" + "hard studio light 45" → keep one
+
+2. ACTRESS DEDUPLICATION:
+   - If more than one actress name appears → keep ONLY the first
+   - Remove all subsequent actress names and their descriptors
+
+3. PARAMETER DEDUPLICATION:
+   - One value per flag: --ar, --stylize/--s, --c/--chaos, --v, --style
+   - If conflict: Motion params take priority over Vars params
+   - --raw stays if present
+   - --no flags: merge all values into one --no
+
+4. TOKEN HIERARCHY (correct order for MJ attention):
+   L1: subject + gender (first 5 tokens — NEVER move these)
+   L2: physique descriptors (tokens 6-15)
+   L3: motion + expression (tokens 16-22)
+   L4: clothing + artifacts (tokens 23-28)
+   L5: environment + lighting (tokens 29-34)
+   L6: camera (tokens 35-38)
+   L7: parameters (always at end)
+
+5. RELEVANCE FILTER (Nexus principle):
+   - Remove generic filler: "beautiful", "stunning", "perfect", "amazing", "high quality", "8k", "masterpiece"
+   - These carry near-zero weight in MJ V8.1 latent space
+   - Keep concrete specifics: measurements, materials, anatomy terms, brand names
+
+6. CONFLICT RESOLUTION:
+   - If motion token conflicts with pose token → motion takes priority
+   - If two lighting tokens conflict → keep the one with higher specificity
+   - If chaos > 40 AND action is "static pose" → flag contradiction, remove static
+
+7. TOKEN LIMIT:
+   - Maximum 38 active descriptive tokens (not counting params)
+   - If over limit: remove lowest specificity tokens first
+
+OUTPUT FORMAT (JSON only, no markdown):
+{
+  "normalized": "clean prompt here --params here",
+  "changes": ["what was removed/merged and why"],
+  "layers": {
+    "subject": "tokens here",
+    "physique": "tokens here", 
+    "motion": "tokens here",
+    "clothing": "tokens here",
+    "environment": "tokens here",
+    "camera": "tokens here",
+    "params": "params here"
+  },
+  "token_count": 32
+}"""
+
+@app.post("/api/normalize", response_model=NormalizeResponse)
+async def normalize(req: NormalizeRequest, api_key: str = Depends(verify_api_key)):
+    token_count_before = len([t for t in req.prompt.split(',') if t.strip() and not t.strip().startswith('--')])
+
+    user_msg = f"""Normalize this Midjourney V8.1 prompt. Apply all rules strictly.
+
+RAW PROMPT:
+{req.prompt}
+
+Return ONLY valid JSON. No markdown, no explanation outside the JSON."""
+
+    content = await openai_chat([
+        {"role": "system", "content": NORMALIZE_SYSTEM},
+        {"role": "user",   "content": user_msg}
+    ], temperature=0.1, max_tokens=1200)
+
+    cleaned = strip_markdown(content)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        import re
+        match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group(0))
+        else:
+            raise HTTPException(status_code=500, detail="Failed to parse normalize response")
+
+    normalized = parsed.get('normalized', req.prompt)
+    changes = parsed.get('changes', [])
+    layers = parsed.get('layers', {})
+    token_count_after = parsed.get('token_count', len([t for t in normalized.split(',') if t.strip() and not t.strip().startswith('--')]))
+
+    return NormalizeResponse(
+        original=req.prompt,
+        normalized=normalized,
+        token_count_before=token_count_before,
+        token_count_after=token_count_after,
+        changes=changes,
+        layers=layers
+    )
